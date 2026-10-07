@@ -1,0 +1,534 @@
+// Springpad database schema. Change it here, then run: npx prisma migrate dev --name <what-changed>
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// A parent (or guardian) account.
+model Customer {
+  id           String    @id @default(uuid()) @db.Uuid
+  email        String    @unique // always stored lower-case
+  passwordHash String    @map("password_hash") // argon2id
+  firstName    String    @map("first_name")
+  lastName     String    @map("last_name")
+  verifiedAt   DateTime? @map("verified_at") // null until the email link is clicked; login refused until set
+  displayName      String?   @map("display_name") // shown in the account area (Figma "Display name")
+  stripeCustomerId String?   @unique @map("stripe_customer_id") // created on first checkout / add-card
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  sessions Session[]
+  tokens   EmailToken[]
+  links        ParentChildLink[]
+  favourites   Favourite[]
+  basket       BasketLine[]
+  orders       Order[]
+  entitlements Entitlement[]
+  addresses    Address[]
+
+  // Child code typed at sign-up; redeemed once the email is verified. Hash only.
+  pendingCodeHash String? @map("pending_code_hash")
+
+  @@map("customer")
+}
+
+// Logged-in session. Only a hash of the token is stored, so a DB leak doesn't leak sessions.
+model Session {
+  id         String   @id @default(uuid()) @db.Uuid
+  tokenHash  String   @unique @map("token_hash")
+  customerId String   @map("customer_id") @db.Uuid
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime @map("expires_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([customerId])
+  @@map("session")
+}
+
+enum EmailTokenType {
+  VERIFY
+  RESET
+  CHANGE_EMAIL
+}
+
+// Single-use links sent by email (verify account, reset password). Hashed like sessions.
+model EmailToken {
+  id         String         @id @default(uuid()) @db.Uuid
+  tokenHash  String         @unique @map("token_hash")
+  type       EmailTokenType
+  customerId String         @map("customer_id") @db.Uuid
+  customer   Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime       @map("expires_at")
+  usedAt     DateTime?      @map("used_at")
+  newEmail   String?        @map("new_email") // CHANGE_EMAIL only: applied when the link is clicked
+  createdAt  DateTime       @default(now()) @map("created_at")
+
+  @@index([customerId, type])
+  @@map("email_token")
+}
+
+// ── Child linking (brief §5) ─────────────────────────────────────────────────────────────
+
+model School {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  children Child[]
+  shoots   Shoot[]
+
+  @@map("school")
+}
+
+// One record per child for their whole school journey (Nursery → Year 6).
+model Child {
+  id        String   @id @default(uuid()) @db.Uuid
+  schoolId  String   @map("school_id") @db.Uuid
+  school    School   @relation(fields: [schoolId], references: [id])
+  firstName String   @map("first_name")
+  lastName  String   @map("last_name")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  enrolments Enrolment[]
+  codes      ChildCode[]
+  links      ParentChildLink[]
+  invites    GuardianInvite[]
+  images     ImageAsset[]
+
+  @@index([schoolId])
+  @@map("child")
+}
+
+// The child's class in a given academic year, e.g. "2026-27" / "Year 2 Oak".
+model Enrolment {
+  id           String @id @default(uuid()) @db.Uuid
+  childId      String @map("child_id") @db.Uuid
+  child        Child  @relation(fields: [childId], references: [id], onDelete: Cascade)
+  academicYear String @map("academic_year")
+  className    String @map("class_name")
+
+  @@unique([childId, academicYear])
+  @@map("enrolment")
+}
+
+// Single-use code printed on the child's ID card. Only a hash is stored.
+model ChildCode {
+  id         String    @id @default(uuid()) @db.Uuid
+  childId    String    @map("child_id") @db.Uuid
+  child      Child     @relation(fields: [childId], references: [id], onDelete: Cascade)
+  shootId    String?   @map("shoot_id") @db.Uuid // the photo day this card was printed for; matching only accepts this shoot's codes
+  shoot      Shoot?    @relation(fields: [shootId], references: [id])
+  codeHash   String    @unique @map("code_hash")
+  expiresAt  DateTime? @map("expires_at")
+  redeemedAt DateTime? @map("redeemed_at")
+  redeemedBy String?   @map("redeemed_by") @db.Uuid
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([childId])
+  @@index([shootId])
+  @@map("child_code")
+}
+
+enum LinkStatus {
+  ACTIVE
+  REVOKED
+}
+
+// The single source of truth for "may this parent see this child?" Every child/gallery/order query filters on it.
+model ParentChildLink {
+  id         String     @id @default(uuid()) @db.Uuid
+  customerId String     @map("customer_id") @db.Uuid
+  customer   Customer   @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  childId    String     @map("child_id") @db.Uuid
+  child      Child      @relation(fields: [childId], references: [id], onDelete: Cascade)
+  status     LinkStatus @default(ACTIVE)
+  verifiedAt DateTime   @default(now()) @map("verified_at")
+  createdAt  DateTime   @default(now()) @map("created_at")
+
+  @@unique([customerId, childId])
+  @@index([childId])
+  @@map("parent_child_link")
+}
+
+// Second parent / guardian, invited by an already-linked parent. Must be accepted by the invited email.
+model GuardianInvite {
+  id          String    @id @default(uuid()) @db.Uuid
+  childId     String    @map("child_id") @db.Uuid
+  child       Child     @relation(fields: [childId], references: [id], onDelete: Cascade)
+  invitedById String    @map("invited_by_id") @db.Uuid
+  email       String
+  tokenHash   String    @unique @map("token_hash")
+  expiresAt   DateTime  @map("expires_at")
+  acceptedAt  DateTime? @map("accepted_at")
+  acceptedBy  String?   @map("accepted_by") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([childId])
+  @@map("guardian_invite")
+}
+
+// Append-only record of every linking event (brief: "audit logging of every child-linking event").
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  action     String // CODE_REDEEMED, CODE_REDEEM_FAILED, GUARDIAN_INVITED, GUARDIAN_ACCEPTED, …
+  customerId String?  @map("customer_id") @db.Uuid
+  staffId    String?  @map("staff_id") @db.Uuid // set for admin actions
+  childId    String?  @map("child_id") @db.Uuid
+  ip         String?
+  detail     Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([customerId, action, createdAt])
+  @@index([childId])
+  @@map("audit_log")
+}
+
+// ── Gallery (Phase 4) ────────────────────────────────────────────────────────────────────
+
+// A photo day at a school, e.g. "Autumn Portraits 2026".
+model Shoot {
+  id           String   @id @default(uuid()) @db.Uuid
+  schoolId     String   @map("school_id") @db.Uuid
+  school       School   @relation(fields: [schoolId], references: [id])
+  name         String
+  academicYear String   @map("academic_year")
+  takenOn      DateTime @map("taken_on") @db.Date
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  images ImageAsset[]
+  photos ShootPhoto[]
+  codes  ChildCode[]
+
+  @@index([schoolId])
+  @@map("shoot")
+}
+
+enum ImageSource {
+  SPRINGPAD // shot by a Springpad photographer
+  PARENT_UPLOAD // reserved for future parent uploads (needs DPIA + consent flow first)
+}
+
+// One photo. The master file is private; parents only ever get resized derivatives via signed URLs.
+model ImageAsset {
+  id         String      @id @default(uuid()) @db.Uuid
+  childId    String      @map("child_id") @db.Uuid
+  child      Child       @relation(fields: [childId], references: [id], onDelete: Cascade)
+  shootId    String?     @map("shoot_id") @db.Uuid
+  shoot      Shoot?      @relation(fields: [shootId], references: [id])
+  reference  String // human label, e.g. "2026-001"
+  source     ImageSource @default(SPRINGPAD)
+  isAnchor   Boolean     @default(false) @map("is_anchor") // child holding their code card — never shown to parents
+  masterKey  String      @map("master_key") // path inside the private master store
+  width      Int
+  height     Int
+  rights     Json? // licence / consent metadata (who may print, for how long, upload consent…)
+  capturedAt DateTime?   @map("captured_at")
+  createdAt  DateTime    @default(now()) @map("created_at")
+
+  favourites  Favourite[]
+  basketLines BasketLine[]
+  orderLines  OrderLine[]
+  shootPhoto  ShootPhoto?
+
+  @@index([childId, isAnchor])
+  @@map("image_asset")
+}
+
+model Favourite {
+  customerId String     @map("customer_id") @db.Uuid
+  customer   Customer   @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  imageId    String     @map("image_id") @db.Uuid
+  image      ImageAsset @relation(fields: [imageId], references: [id], onDelete: Cascade)
+  createdAt  DateTime   @default(now()) @map("created_at")
+
+  @@id([customerId, imageId])
+  @@map("favourite")
+}
+
+// ── Basket, orders, entitlements (Phase 5) ───────────────────────────────────────────────
+
+// Server-side basket. Holds choices only — prices are always recomputed from the catalogue.
+model BasketLine {
+  id         String     @id @default(uuid()) @db.Uuid
+  customerId String     @map("customer_id") @db.Uuid
+  customer   Customer   @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  imageId    String     @map("image_id") @db.Uuid
+  image      ImageAsset @relation(fields: [imageId], references: [id], onDelete: Cascade)
+  sizeCode   String     @map("size_code")
+  frameCode  String     @map("frame_code")
+  mat        Boolean    @default(false)
+  quantity   Int        @default(1)
+  createdAt  DateTime   @default(now()) @map("created_at")
+
+  @@index([customerId])
+  @@map("basket_line")
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  CANCELLED
+  REFUNDED // fully refunded; partial refunds stay PAID with refunded_pence > 0
+}
+
+enum Fulfilment {
+  NOT_REQUIRED // digital only
+  TO_PRINT
+  PRINTING
+  DISPATCHED
+}
+
+model Order {
+  id              String      @id @default(uuid()) @db.Uuid
+  number          Int         @unique @default(autoincrement()) // shown as SP-10001; the uuid is what URLs use
+  customerId      String      @map("customer_id") @db.Uuid
+  customer        Customer    @relation(fields: [customerId], references: [id])
+  status          OrderStatus @default(PENDING_PAYMENT)
+  currency        String      @default("GBP")
+  subtotalPence   Int         @map("subtotal_pence")
+  deliveryPence   Int         @map("delivery_pence")
+  discountPence   Int         @default(0) @map("discount_pence")
+  promoCode       String?     @map("promo_code") // snapshot of the code used
+  totalPence      Int         @map("total_pence")
+  email           String
+  shipping        Json // { name, address }
+  stripeSessionId String?     @unique @map("stripe_session_id")
+  paidAt          DateTime?   @map("paid_at")
+  createdAt       DateTime    @default(now()) @map("created_at")
+  // In-house printing: set when paid (TO_PRINT if there are prints), then moved on by staff.
+  fulfilment      Fulfilment  @default(NOT_REQUIRED)
+  carrier         String?
+  trackingNumber  String?     @map("tracking_number")
+  dispatchedAt    DateTime?   @map("dispatched_at")
+  refundedPence   Int         @default(0) @map("refunded_pence")
+
+  lines   OrderLine[]
+  refunds OrderRefund[]
+
+  @@index([customerId, createdAt])
+  @@map("order")
+}
+
+// Snapshot at purchase time: title and price are frozen even if the catalogue changes later.
+model OrderLine {
+  id             String     @id @default(uuid()) @db.Uuid
+  orderId        String     @map("order_id") @db.Uuid
+  order          Order      @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  imageId        String     @map("image_id") @db.Uuid
+  image          ImageAsset @relation(fields: [imageId], references: [id])
+  title          String
+  sizeCode       String     @map("size_code")
+  frameCode      String     @map("frame_code")
+  mat            Boolean
+  digital        Boolean
+  quantity       Int
+  unitPricePence Int        @map("unit_price_pence")
+
+  entitlements Entitlement[]
+
+  @@index([orderId])
+  @@map("order_line")
+}
+
+// What a paid order unlocks (brief: generate → preview → entitle → download). Today: digital files.
+model Entitlement {
+  id          String    @id @default(uuid()) @db.Uuid
+  customerId  String    @map("customer_id") @db.Uuid
+  customer    Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  orderLineId String    @unique @map("order_line_id") @db.Uuid
+  orderLine   OrderLine @relation(fields: [orderLineId], references: [id], onDelete: Cascade)
+  imageId     String    @map("image_id") @db.Uuid
+  grantedAt   DateTime  @default(now()) @map("granted_at")
+
+  @@index([customerId])
+  @@map("entitlement")
+}
+
+// ── Account data (Phase 6) ───────────────────────────────────────────────────────────────
+
+// UK postal address. One may be the default for delivery and one for billing.
+model Address {
+  id                String   @id @default(uuid()) @db.Uuid
+  customerId        String   @map("customer_id") @db.Uuid
+  customer          Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  name              String
+  line1             String
+  line2             String?
+  city              String
+  postcode          String
+  country           String   @default("United Kingdom")
+  isDefaultShipping Boolean  @default(false) @map("is_default_shipping")
+  isDefaultBilling  Boolean  @default(false) @map("is_default_billing")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@index([customerId])
+  @@map("address")
+}
+
+// Discount codes, created by staff (SQL / seed for now). Exactly one of percentOff / amountOffPence is set.
+model PromoCode {
+  code             String    @id // stored upper-case
+  percentOff       Int?      @map("percent_off") // 1–100
+  amountOffPence   Int?      @map("amount_off_pence")
+  minSubtotalPence Int       @default(0) @map("min_subtotal_pence")
+  expiresAt        DateTime? @map("expires_at")
+  maxRedemptions   Int?      @map("max_redemptions")
+  redemptions      Int       @default(0) // counted when an order is paid
+  active           Boolean   @default(true)
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@map("promo_code")
+}
+
+// Help-page contact form. Stored first so no message is lost if email delivery fails.
+model SupportRequest {
+  id         String   @id @default(uuid()) @db.Uuid
+  number     Int      @unique @default(autoincrement()) // shown to the parent as their reference
+  name       String
+  email      String
+  subject    String
+  schoolName String?  @map("school_name")
+  message    String
+  createdAt  DateTime @default(now()) @map("created_at")
+  resolved   Boolean  @default(false)
+
+  replies SupportReply[]
+
+  @@map("support_request")
+}
+
+// A staff reply, emailed to the parent.
+model SupportReply {
+  id        String         @id @default(uuid()) @db.Uuid
+  requestId String         @map("request_id") @db.Uuid
+  request   SupportRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  staffId   String         @map("staff_id") @db.Uuid
+  body      String
+  createdAt DateTime       @default(now()) @map("created_at")
+
+  @@index([requestId])
+  @@map("support_reply")
+}
+
+// Each refund made from the admin (Stripe refund id when real money moved).
+model OrderRefund {
+  id             String   @id @default(uuid()) @db.Uuid
+  orderId        String   @map("order_id") @db.Uuid
+  order          Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  amountPence    Int      @map("amount_pence")
+  reason         String
+  staffId        String   @map("staff_id") @db.Uuid
+  stripeRefundId String?  @map("stripe_refund_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([orderId])
+  @@map("order_refund")
+}
+
+// ── Admin (staff) ─────────────────────────────────────────────────────────────────────────
+// Staff are separate from parents: own table, own sessions, password + emailed code at every login.
+
+enum StaffRole {
+  SUPERADMIN // everything, plus managing staff accounts
+  STAFF
+}
+
+model StaffUser {
+  id              String    @id @default(uuid()) @db.Uuid
+  email           String    @unique
+  name            String
+  role            StaffRole @default(STAFF)
+  passwordHash    String?   @map("password_hash") // null until they accept the invite
+  active          Boolean   @default(true)
+  inviteTokenHash String?   @unique @map("invite_token_hash") // set-password link (invite or reset)
+  inviteExpiresAt DateTime? @map("invite_expires_at")
+  lastLoginAt     DateTime? @map("last_login_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  sessions   StaffSession[]
+  challenges StaffLoginChallenge[]
+
+  @@map("staff_user")
+}
+
+model StaffSession {
+  tokenHash String    @id @map("token_hash")
+  staffId   String    @map("staff_id") @db.Uuid
+  staff     StaffUser @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  expiresAt DateTime  @map("expires_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@index([staffId])
+  @@map("staff_session")
+}
+
+// Second login step: a 6-digit code emailed after the correct password.
+model StaffLoginChallenge {
+  id         String    @id @default(uuid()) @db.Uuid
+  staffId    String    @map("staff_id") @db.Uuid
+  staff      StaffUser @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  codeHash   String    @map("code_hash")
+  attempts   Int       @default(0)
+  expiresAt  DateTime  @map("expires_at")
+  consumedAt DateTime? @map("consumed_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([staffId])
+  @@map("staff_login_challenge")
+}
+
+// An uploaded shoot photo before it reaches any parent. Matching to children is recomputed from these rows
+// (capture order + card reads + staff overrides); publishing turns matched photos into ImageAssets.
+model ShootPhoto {
+  id                String      @id @default(uuid()) @db.Uuid
+  shootId           String      @map("shoot_id") @db.Uuid
+  shoot             Shoot       @relation(fields: [shootId], references: [id], onDelete: Cascade)
+  masterKey         String      @map("master_key")
+  filename          String
+  sha256            String // same file uploaded twice is ignored
+  width             Int
+  height            Int
+  capturedAt        DateTime?   @map("captured_at") // camera EXIF time, else the file's modified time
+  decodeKind        String      @map("decode_kind") // QR | OCR | UNREADABLE | NONE
+  decodedChildId    String?     @map("decoded_child_id") @db.Uuid // card code matched to a child of this school
+  decodedUnknown    Boolean     @default(false) @map("decoded_unknown") // a code was read but isn't this school's
+  overrideChildId   String?     @map("override_child_id") @db.Uuid // staff: "this is the card photo for X"
+  overrideNotAnchor Boolean     @default(false) @map("override_not_anchor") // staff: "not a card photo"
+  excluded          Boolean     @default(false) // staff: leave out entirely
+  runApproved       Boolean     @default(false) @map("run_approved") // staff checked this card photo's run
+  imageId           String?     @unique @map("image_id") @db.Uuid // set once published
+  image             ImageAsset? @relation(fields: [imageId], references: [id])
+  uploadedAt        DateTime    @default(now()) @map("uploaded_at")
+
+  @@unique([shootId, sha256])
+  @@index([shootId])
+  @@map("shoot_photo")
+}
+
+enum OptionKind {
+  SIZE // print sizes and the digital file
+  FRAME
+  EXTRA // add-ons and charges: "mat", "delivery"
+}
+
+// What parents can buy, with prices. Edited in the admin; checkout always re-prices from here.
+// Options are switched off rather than deleted, because order lines keep their codes.
+model ProductOption {
+  code       String     @id // e.g. "8x10", "oak", "mat"
+  kind       OptionKind
+  label      String
+  hint       String?
+  pricePence Int        @map("price_pence")
+  digital    Boolean    @default(false) // SIZE only: a download, not a print
+  swatch     String? // FRAME only: colour shown in the picker, e.g. #8a5a2b
+  active     Boolean    @default(true)
+  sortOrder  Int        @default(0) @map("sort_order")
+  updatedAt  DateTime   @updatedAt @map("updated_at")
+
+  @@map("product_option")
+}

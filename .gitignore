@@ -1,0 +1,10 @@
+node_modules
+# Keep environment variables out of version control
+.env
+
+dist/
+*.tsbuildinfo
+/src/generated/prisma
+tmp/
+storage/
+.seed-build/
