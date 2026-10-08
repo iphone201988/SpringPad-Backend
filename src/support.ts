@@ -24,7 +24,7 @@ export class SupportController {
   constructor(
     private readonly db: PrismaService,
     private readonly mail: MailService,
-  ) {}
+  ) { }
 
   @Post() @HttpCode(201) @Throttle({ default: { limit: 3, ttl: 60_000 } })
   async create(@Body() dto: SupportDto) {
@@ -42,4 +42,4 @@ export class SupportController {
 }
 
 @Module({ controllers: [SupportController], providers: [MailService] })
-export class SupportModule {}
+export class SupportModule { }
