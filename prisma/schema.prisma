@@ -30,6 +30,7 @@ model Customer {
   orders       Order[]
   entitlements Entitlement[]
   addresses    Address[]
+  generations  GenerationJob[]
 
   // Child code typed at sign-up; redeemed once the email is verified. Hash only.
   pendingCodeHash String? @map("pending_code_hash")
@@ -155,12 +156,15 @@ model ParentChildLink {
   @@map("parent_child_link")
 }
 
-// Second parent / guardian, invited by an already-linked parent. Must be accepted by the invited email.
+// An invitation to see one child, sent by an already-linked parent (second parent / guardian) or by staff to a
+// parent contact the school verified (brief §5 "school-verified contact push"). Exactly one sender is set (DB check).
+// Must be accepted by the account with the invited email.
 model GuardianInvite {
   id          String    @id @default(uuid()) @db.Uuid
   childId     String    @map("child_id") @db.Uuid
   child       Child     @relation(fields: [childId], references: [id], onDelete: Cascade)
-  invitedById String    @map("invited_by_id") @db.Uuid
+  invitedById String?   @map("invited_by_id") @db.Uuid // parent who invited
+  staffId     String?   @map("staff_id") @db.Uuid // staff who sent a school invite
   email       String
   tokenHash   String    @unique @map("token_hash")
   expiresAt   DateTime  @map("expires_at")
@@ -319,8 +323,11 @@ model OrderLine {
   id             String     @id @default(uuid()) @db.Uuid
   orderId        String     @map("order_id") @db.Uuid
   order          Order      @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  imageId        String     @map("image_id") @db.Uuid
-  image          ImageAsset @relation(fields: [imageId], references: [id])
+  // A line is a photo product or a generated one; exactly one of these is set (DB check).
+  imageId        String?        @map("image_id") @db.Uuid
+  image          ImageAsset?    @relation(fields: [imageId], references: [id], onDelete: Restrict)
+  jobId          String?        @map("job_id") @db.Uuid
+  job            GenerationJob? @relation(fields: [jobId], references: [id], onDelete: Restrict)
   title          String
   sizeCode       String     @map("size_code")
   frameCode      String     @map("frame_code")
@@ -335,18 +342,53 @@ model OrderLine {
   @@map("order_line")
 }
 
-// What a paid order unlocks (brief: generate → preview → entitle → download). Today: digital files.
+// What a paid order unlocks (brief: generate → preview → entitle → download): a photo's original, or a generated
+// product's result. The entitlement can exist before the product does; the download opens when the job is DONE.
 model Entitlement {
-  id          String    @id @default(uuid()) @db.Uuid
-  customerId  String    @map("customer_id") @db.Uuid
-  customer    Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  orderLineId String    @unique @map("order_line_id") @db.Uuid
-  orderLine   OrderLine @relation(fields: [orderLineId], references: [id], onDelete: Cascade)
-  imageId     String    @map("image_id") @db.Uuid
-  grantedAt   DateTime  @default(now()) @map("granted_at")
+  id          String         @id @default(uuid()) @db.Uuid
+  customerId  String         @map("customer_id") @db.Uuid
+  customer    Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  orderLineId String         @unique @map("order_line_id") @db.Uuid
+  orderLine   OrderLine      @relation(fields: [orderLineId], references: [id], onDelete: Cascade)
+  imageId     String?        @map("image_id") @db.Uuid // exactly one of imageId / jobId is set (DB check)
+  jobId       String?        @map("job_id") @db.Uuid
+  job         GenerationJob? @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  grantedAt   DateTime       @default(now()) @map("granted_at")
 
   @@index([customerId])
   @@map("entitlement")
+}
+
+// ── Generated products (brief "architect now": the AI growth montage and later products) ─────────────────────
+
+enum GenerationStatus {
+  QUEUED
+  RUNNING
+  DONE
+  FAILED
+}
+
+// Something made for a parent from photos by an AI provider (src/generation). It can be ordered and paid for
+// before it exists. Files live in the private master store, like photo masters; parents never get the keys.
+model GenerationJob {
+  id            String           @id @default(uuid()) @db.Uuid
+  customerId    String           @map("customer_id") @db.Uuid
+  customer      Customer         @relation(fields: [customerId], references: [id])
+  kind          String // e.g. "MONTAGE"
+  provider      String // name of the GenerationProvider that makes it
+  status        GenerationStatus @default(QUEUED)
+  inputImageIds String[]         @map("input_image_ids") @db.Uuid // in the order they're used
+  previewKey    String?          @map("preview_key") // low-res / watermarked, may be shown before payment
+  resultKey     String?          @map("result_key") // the full file an entitlement unlocks
+  error         String?
+  createdAt     DateTime         @default(now()) @map("created_at")
+  updatedAt     DateTime         @updatedAt @map("updated_at")
+
+  orderLines   OrderLine[]
+  entitlements Entitlement[]
+
+  @@index([customerId])
+  @@map("generation_job")
 }
 
 // ── Account data (Phase 6) ───────────────────────────────────────────────────────────────

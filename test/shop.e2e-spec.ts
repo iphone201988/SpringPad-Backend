@@ -1,11 +1,11 @@
 // Basket → checkout → paid order → entitlement, against a running API in simulated-payment mode
 // (STRIPE_SECRET_KEY empty). Run: npm run test:e2e
 import 'dotenv/config';
-import { copyFile, mkdir, readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import pg from 'pg';
 import { generateChildCode, hashChildCode } from '../src/children/linking.js';
-import { masterPath } from '../src/gallery/media.js';
+import { putMaster } from '../src/gallery/media.js';
 
 const API = process.env.API_URL ?? 'http://localhost:3001';
 const ip = `10.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.4`;
@@ -42,8 +42,7 @@ describe.skipIf(!!process.env.STRIPE_SECRET_KEY)('shop (simulated payments)', ()
     const child = (await db.query(`INSERT INTO child (id, school_id, first_name, last_name) VALUES (gen_random_uuid(), $1, 'Mia', 'E2E') RETURNING id`, [school])).rows[0].id;
     await db.query(`INSERT INTO child_code (id, child_id, code_hash) VALUES (gen_random_uuid(), $1, $2)`, [child, hashChildCode(code)]);
     const key = `shop-e2e-${run}/1.png`;
-    await mkdir(path.dirname(masterPath(key)), { recursive: true });
-    await copyFile(path.resolve('../frontend/public/images/portrait-emma.png'), masterPath(key));
+    await putMaster(key, await readFile(path.resolve('../frontend/public/images/portrait-emma.png'))); // same storage the API reads (S3 or MEDIA_DIR)
     photoId = (await db.query(`INSERT INTO image_asset (id, child_id, reference, master_key, width, height) VALUES (gen_random_uuid(), $1, 'SHOP-001', $2, 500, 500) RETURNING id`, [child, key])).rows[0].id;
     await db.end();
     buyer = await parent(`sb+${run}@example.com`, code);

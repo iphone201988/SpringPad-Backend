@@ -1,10 +1,10 @@
 // Gallery + signed media against a running API (npm run start:dev).
 import 'dotenv/config';
-import { copyFile, mkdir, readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import pg from 'pg';
 import { generateChildCode, hashChildCode } from '../src/children/linking.js';
-import { masterPath } from '../src/gallery/media.js';
+import { putMaster } from '../src/gallery/media.js';
 
 const API = process.env.API_URL ?? 'http://localhost:3001';
 const ip = `10.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.3`;
@@ -44,8 +44,7 @@ describe('gallery', () => {
     await db.query(`INSERT INTO child_code (id, child_id, code_hash) VALUES (gen_random_uuid(), $1, $2)`, [childId, hashChildCode(code)]);
     const add = async (ref: string, anchor: boolean) => {
       const key = `e2e-${run}/${ref}.png`;
-      await mkdir(path.dirname(masterPath(key)), { recursive: true });
-      await copyFile(path.resolve('../frontend/public/images/portrait-emma.png'), masterPath(key));
+      await putMaster(key, await readFile(path.resolve('../frontend/public/images/portrait-emma.png'))); // same storage the API reads (S3 or MEDIA_DIR)
       return (await db.query(`INSERT INTO image_asset (id, child_id, reference, is_anchor, master_key, width, height) VALUES (gen_random_uuid(), $1, $2, $3, $4, 500, 500) RETURNING id`, [childId, ref, anchor, key])).rows[0].id as string;
     };
     await add('ANCHOR', true);

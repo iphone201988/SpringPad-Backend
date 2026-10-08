@@ -7,5 +7,7 @@ export default defineConfig({
     globals: true,
     root: './',
     include: ['**/*.e2e-spec.ts'],
+    testTimeout: 60_000, // the database is remote (Neon): every query is a network round trip
+    hookTimeout: 60_000,
   },
 });

@@ -2,7 +2,9 @@ import { BadRequestException, Body, ConflictException, Controller, Get, HttpCode
 import { Transform } from 'class-transformer';
 import { ArrayMaxSize, IsArray, IsBoolean, IsEmail, IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, Matches, MaxLength } from 'class-validator';
 import type { Request } from 'express';
+import { DAY, hashToken, newToken } from '../auth/tokens.js';
 import { generateChildCode, hashChildCode } from '../children/linking.js';
+import { MailService } from '../mail.service.js';
 import { PrismaService } from '../prisma.service.js';
 import { CurrentStaff, requireSuperadmin, StaffAuthService, StaffGuard, type Staff } from './staff-auth.js';
 
@@ -37,6 +39,12 @@ class ImportDto {
   @IsString() @MaxLength(500_000) csv: string;
 }
 
+class InviteParentDto {
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim().toLowerCase() : value)) @IsEmail() @MaxLength(254) email: string;
+}
+
+const SCHOOL_INVITE_TTL = 30 * DAY; // parents may not act until photos are out; the link only works for this email
+
 class IssueCodesDto {
   @IsUUID() shootId: string;
   @IsArray() @ArrayMaxSize(2000) @IsUUID('4', { each: true }) childIds: string[];
@@ -48,6 +56,7 @@ export class AdminController {
   constructor(
     private readonly db: PrismaService,
     private readonly auth: StaffAuthService,
+    private readonly mail: MailService,
   ) {}
 
   private audit(staff: Staff, action: string, data: { childId?: string; customerId?: string; ip?: string; detail?: object } = {}) {
@@ -232,6 +241,7 @@ export class AdminController {
         enrolments: { orderBy: { academicYear: 'desc' }, select: { academicYear: true, className: true } },
         links: { orderBy: { createdAt: 'asc' }, select: { id: true, status: true, verifiedAt: true, customer: { select: { email: true, firstName: true, lastName: true } } } },
         codes: { orderBy: { createdAt: 'desc' }, select: { id: true, createdAt: true, redeemedAt: true, expiresAt: true, shoot: { select: { id: true, name: true } } } },
+        invites: { orderBy: { createdAt: 'desc' }, take: 50, select: { id: true, email: true, createdAt: true, expiresAt: true, acceptedAt: true, staffId: true } },
         _count: { select: { images: true } },
       },
     });
@@ -239,7 +249,32 @@ export class AdminController {
     const history = await this.db.auditLog.findMany({ where: { childId: id }, orderBy: { createdAt: 'desc' }, take: 50, select: { id: true, action: true, createdAt: true, ip: true, customerId: true, staffId: true } });
     const now = new Date();
     const codes = c.codes.map((k) => ({ ...k, status: k.redeemedAt ? 'REDEEMED' : k.expiresAt && k.expiresAt <= now ? 'REVOKED' : 'ISSUED' }));
-    return { ...c, codes, history };
+    const invites = c.invites.map(({ staffId, ...i }) => ({ ...i, fromSchool: staffId !== null }));
+    return { ...c, codes, invites, history };
+  }
+
+  /**
+   * Brief §5 "school-verified contact push": emails a single-use invitation to a parent contact the school holds.
+   * Only staff can send these, so a parent can never point an invitation at a child. Accepting needs an account
+   * with this email (same flow and page as guardian invites), so a forwarded link is useless.
+   */
+  @Post('children/:id/invites')
+  async inviteParent(@CurrentStaff() me: Staff, @Param('id', ParseUUIDPipe) id: string, @Body() dto: InviteParentDto, @Req() req: Request) {
+    const child = await this.db.child.findUnique({
+      where: { id },
+      select: { firstName: true, school: { select: { name: true } }, links: { where: { status: 'ACTIVE', customer: { email: dto.email } }, select: { id: true } } },
+    });
+    if (!child) throw new NotFoundException();
+    if (child.links.length) throw new ConflictException('That parent already has access.');
+    const token = newToken();
+    await this.db.guardianInvite.create({ data: { childId: id, staffId: me.id, email: dto.email, tokenHash: hashToken(token), expiresAt: new Date(Date.now() + SCHOOL_INVITE_TTL) } });
+    await this.audit(me, 'SCHOOL_INVITED', { childId: id, ip: req.ip, detail: { email: dto.email } });
+    await this.mail.send(
+      dto.email,
+      `See ${child.firstName}’s school photos on Springpad`,
+      `${child.school.name} has invited you to see ${child.firstName}’s school photos on Springpad.\n\nSign in or create an account with this email address (${dto.email}), then accept here:\n${process.env.STOREFRONT_URL}/guardian-invite?token=${token}\n\nThis invitation expires in 30 days. If you weren’t expecting it, you can ignore this email.`,
+    );
+    return { ok: true };
   }
 
   @Patch('children/:id')

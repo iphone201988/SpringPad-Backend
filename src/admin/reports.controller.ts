@@ -16,6 +16,7 @@ function range(from?: string, to?: string) {
 
 // Money is in pence. "Net" = paid minus refunded. Sales by school/product are line totals before order-level
 // discounts (an order can include siblings at different schools, so discounts aren't split per school).
+// Generated products (montage etc., no photo) count in the totals and the CSV but not in the per-school table.
 @Controller('admin/reports')
 @UseGuards(StaffGuard)
 export class ReportsController {
@@ -83,8 +84,8 @@ export class ReportsController {
       SELECT 'SP-' || o.number AS "order", o.paid_at AS "paid_at", o.status, o.email, s.name AS school,
              c.first_name || ' ' || c.last_name AS child, l.title AS item, l.quantity, l.unit_price_pence / 100.0 AS "unit_price_gbp",
              o.discount_pence / 100.0 AS "order_discount_gbp", o.total_pence / 100.0 AS "order_total_gbp", o.refunded_pence / 100.0 AS "order_refunded_gbp"
-      FROM "order" o JOIN order_line l ON l.order_id = o.id JOIN image_asset i ON i.id = l.image_id
-      JOIN child c ON c.id = i.child_id JOIN school s ON s.id = c.school_id
+      FROM "order" o JOIN order_line l ON l.order_id = o.id LEFT JOIN image_asset i ON i.id = l.image_id
+      LEFT JOIN child c ON c.id = i.child_id LEFT JOIN school s ON s.id = c.school_id -- generated products have no photo
       WHERE o.status IN ('PAID','REFUNDED') AND o.paid_at >= ${start} AND o.paid_at < ${endExclusive}
       ORDER BY o.paid_at, o.number`;
     const cols = ['order', 'paid_at', 'status', 'email', 'school', 'child', 'item', 'quantity', 'unit_price_gbp', 'order_discount_gbp', 'order_total_gbp', 'order_refunded_gbp'];

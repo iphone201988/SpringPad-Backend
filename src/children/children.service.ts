@@ -76,13 +76,14 @@ export class ChildrenService {
       await audit(this.db, 'GUARDIAN_ACCEPT_FAILED', { customerId: customer.id, ip });
       throw new BadRequestException('This invitation is invalid, has expired, or was sent to a different email address.');
     }
-    const { childId, invitedById } = claimed[0];
+    const { childId, invitedById, staffId } = claimed[0];
     await this.db.parentChildLink.upsert({
       where: { customerId_childId: { customerId: customer.id, childId } },
       create: { customerId: customer.id, childId },
       update: { status: 'ACTIVE', verifiedAt: new Date() },
     });
-    await audit(this.db, 'GUARDIAN_ACCEPTED', { customerId: customer.id, childId, ip, detail: { invitedById } });
+    // staffId: a school invite sent from the admin; otherwise a linked parent invited a guardian
+    await audit(this.db, staffId ? 'SCHOOL_INVITE_ACCEPTED' : 'GUARDIAN_ACCEPTED', { customerId: customer.id, childId, ip, detail: staffId ? { staffId } : { invitedById } });
     return (await this.listForCustomer(customer.id)).find((c) => c.id === childId);
   }
 }

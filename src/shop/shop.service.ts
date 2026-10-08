@@ -129,7 +129,8 @@ export class ShopService {
     const lines = await this.db.orderLine.findMany({ where: { orderId } });
     if (lines.some((l) => !l.digital)) await this.db.order.update({ where: { id: orderId }, data: { fulfilment: 'TO_PRINT' } });
     await this.db.entitlement.createMany({
-      data: lines.filter((l) => l.digital).map((l) => ({ customerId: o.customerId, orderLineId: l.id, imageId: l.imageId })),
+      // a generated product's line carries jobId: entitled now, downloadable once the job is DONE
+      data: lines.filter((l) => l.digital).map((l) => ({ customerId: o.customerId, orderLineId: l.id, imageId: l.imageId, jobId: l.jobId })),
       skipDuplicates: true,
     });
     const gbp = (p: number) => `£${(p / 100).toFixed(2)}`;
@@ -144,7 +145,7 @@ export class ShopService {
     return this.db.order.findMany({
       where: { customerId, status: status ?? { not: 'PENDING_PAYMENT' } },
       orderBy: { createdAt: 'desc' },
-      select: { id: true, number: true, status: true, totalPence: true, createdAt: true, _count: { select: { lines: true } } },
+      select: { id: true, number: true, status: true, fulfilment: true, totalPence: true, createdAt: true, _count: { select: { lines: true } } },
     });
   }
 
@@ -196,8 +197,9 @@ export class ShopService {
       orderBy: { grantedAt: 'desc' },
       include: { orderLine: { select: { order: { select: { number: true } } } } },
     });
+    // ponytail: generated products (jobId) aren't listed yet; add them with the montage UI and a result-file route
     const images = await this.db.imageAsset.findMany({
-      where: { id: { in: items.map((e) => e.imageId) } },
+      where: { id: { in: items.flatMap((e) => (e.imageId ? [e.imageId] : [])) } },
       select: { id: true, reference: true, width: true, height: true, masterKey: true, child: { select: { firstName: true } } },
     });
     return items.flatMap((e) => {

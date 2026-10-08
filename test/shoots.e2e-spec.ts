@@ -60,4 +60,4 @@ describe('shoots', () => {
     expect((imgs.images ?? imgs).length).toBe(2);
     expect((await call('GET', `/children/${ben.childId}/images`, undefined, parent)).status).toBe(404);
   });
-}, 60_000);
+}, 240_000); // 10 uploads, each to S3 and the hosted DB
