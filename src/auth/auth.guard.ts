@@ -10,7 +10,7 @@ export const bearer = (req: Request) => req.headers.authorization?.match(/^Beare
 // Requires a valid session token (Authorization: Bearer …). The Next.js server sends it from its httpOnly cookie.
 @Injectable()
 export class AuthGuard implements CanActivate {
-  constructor(private readonly auth: AuthService) {}
+  constructor(private readonly auth: AuthService) { }
 
   async canActivate(ctx: ExecutionContext) {
     const req = ctx.switchToHttp().getRequest<AuthedRequest>();
