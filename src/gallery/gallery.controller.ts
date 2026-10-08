@@ -3,9 +3,8 @@ import { SkipThrottle } from '@nestjs/throttler';
 import type { Response } from 'express';
 import { AuthGuard, CurrentCustomer, type AuthedCustomer } from '../auth/auth.guard.js';
 import { GalleryService } from './gallery.service.js';
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { derivative, isVariant, masterPath, verifySignature } from './media.js';
+import { derivative, derivativeKey, ensureDerivative, getMaster, isVariant, s3Url, verifySignature } from './media.js';
 
 const uuid = new ParseUUIDPipe();
 
@@ -56,11 +55,22 @@ export class MediaController {
       'Cache-Control': 'private, max-age=300', // matches the URL lifetime; never shared caches
       'Cross-Origin-Resource-Policy': 'cross-origin', // the site (another origin) displays these
     };
+    // On S3: signature checked above, so hand the browser a short-lived direct S3 link instead of streaming bytes.
+    if (variant === 'original') {
+      const direct = await s3Url(`masters/${img.masterKey}`, `springpad-${id}${path.extname(img.masterKey).toLowerCase()}`);
+      if (direct) return res.set(headers).redirect(302, direct);
+    } else {
+      const direct = await s3Url(derivativeKey(id, variant));
+      if (direct) {
+        await ensureDerivative(id, img.masterKey, variant); // make sure it exists before linking to it
+        return res.set(headers).redirect(302, direct);
+      }
+    }
     if (variant === 'original') {
       // Full-resolution file for a paid download (the signature was issued from an entitlement).
       const ext = path.extname(img.masterKey).toLowerCase();
       res.set({ ...headers, 'Content-Type': ext === '.png' ? 'image/png' : 'image/jpeg', 'Content-Disposition': `attachment; filename="springpad-${id}${ext}"` });
-      return res.send(await readFile(masterPath(img.masterKey)));
+      return res.send(await getMaster(img.masterKey));
     }
     res.set({ ...headers, 'Content-Type': 'image/webp' }).send(await derivative(id, img.masterKey, variant));
   }

@@ -1,7 +1,9 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { mkdir, readFile, stat } from 'node:fs/promises';
+import { GetObjectCommand, HeadObjectCommand, NoSuchKey, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import sharp from 'sharp';
+import sharp, { type ResizeOptions } from 'sharp';
 
 // Derivatives parents may see. 'original' (the master) is only ever signed for a paid digital entitlement.
 export const VARIANTS = { thumb: 600, preview: 1400 } as const;
@@ -10,11 +12,70 @@ export const isVariant = (v: string): v is Variant => v in VARIANTS || v === 'or
 
 const URL_TTL_SECONDS = 5 * 60;
 const root = () => path.resolve(process.env.MEDIA_DIR ?? 'storage');
-export const masterPath = (key: string) => {
-  const p = path.resolve(root(), 'masters', key);
-  if (!p.startsWith(path.join(root(), 'masters') + path.sep)) throw new Error('bad master key'); // no ../ escapes
+const localPath = (key: string) => {
+  const p = path.resolve(root(), key);
+  if (!p.startsWith(root() + path.sep) || key.includes('..')) throw new Error('bad media key'); // no ../ escapes
   return p;
 };
+export const masterPath = (key: string) => localPath(`masters/${key}`);
+
+// Private S3 bucket when AWS_S3_BUCKET is set (credentials/region come from the standard AWS_* env vars); local disk otherwise.
+// Objects are never public: the API streams them behind its own signed URLs.
+let s3: S3Client | undefined;
+const bucket = () => process.env.AWS_S3_BUCKET;
+const client = () => (s3 ??= new S3Client({}));
+
+export async function putObject(key: string, body: Buffer, contentType?: string) {
+  if (bucket()) return void (await client().send(new PutObjectCommand({ Bucket: bucket(), Key: key, Body: body, ContentType: contentType })));
+  await mkdir(path.dirname(localPath(key)), { recursive: true });
+  await writeFile(localPath(key), body);
+}
+
+/** Object bytes, or null if it doesn't exist. */
+export async function getObject(key: string): Promise<Buffer | null> {
+  try {
+    if (!bucket()) return await readFile(localPath(key));
+    const r = await client().send(new GetObjectCommand({ Bucket: bucket(), Key: key }));
+    return Buffer.from(await r.Body!.transformToByteArray());
+  } catch (e) {
+    if (e instanceof NoSuchKey || (e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw e;
+  }
+}
+
+export const getMaster = async (masterKey: string) => {
+  const b = await getObject(`masters/${masterKey}`);
+  if (!b) throw new Error(`missing master ${masterKey}`);
+  return b;
+};
+export const putMaster = (masterKey: string, body: Buffer) => putObject(`masters/${masterKey}`, body);
+
+/** Short-lived direct S3 link (null when storing on local disk). Only call after the access check. */
+export const s3Url = (key: string, downloadName?: string) =>
+  bucket()
+    ? getSignedUrl(client(), new GetObjectCommand({
+        Bucket: bucket(), Key: key, ResponseCacheControl: 'private, max-age=300',
+        ResponseContentDisposition: downloadName && `attachment; filename="${downloadName}"`,
+      }), { expiresIn: URL_TTL_SECONDS })
+    : Promise.resolve(null);
+
+/** Create the derivative in S3 if missing, without downloading it when it already exists. */
+export async function ensureDerivative(imageId: string, masterKey: string, variant: keyof typeof VARIANTS) {
+  try {
+    await client().send(new HeadObjectCommand({ Bucket: bucket(), Key: derivativeKey(imageId, variant) }));
+  } catch {
+    await derivative(imageId, masterKey, variant);
+  }
+}
+
+/** Stored WebP at `key`, built from the master with `resize` on first request. */
+export async function cachedWebp(key: string, masterKey: string, resize: ResizeOptions, quality: number) {
+  const hit = await getObject(key);
+  if (hit) return hit;
+  const out = await sharp(await getMaster(masterKey)).rotate().resize(resize).webp({ quality }).toBuffer();
+  await putObject(key, out, 'image/webp');
+  return out;
+}
 
 const sign = (imageId: string, variant: Variant, exp: number) =>
   createHmac('sha256', process.env.MEDIA_SIGNING_KEY ?? '').update(`${imageId}:${variant}:${exp}`).digest('base64url');
@@ -32,14 +93,7 @@ export function verifySignature(imageId: string, variant: Variant, exp: number, 
   return expected.length === given.length && timingSafeEqual(expected, given);
 }
 
-/** Resized WebP from the private master, generated once and cached on disk. */
-export async function derivative(imageId: string, masterKey: string, variant: keyof typeof VARIANTS) {
-  const out = path.join(root(), 'derived', variant, `${imageId}.webp`);
-  try {
-    await stat(out);
-  } catch {
-    await mkdir(path.dirname(out), { recursive: true });
-    await sharp(masterPath(masterKey)).rotate().resize({ width: VARIANTS[variant], withoutEnlargement: true }).webp({ quality: 82 }).toFile(out);
-  }
-  return readFile(out);
-}
+/** Resized WebP from the private master, generated once and cached in storage. */
+export const derivativeKey = (imageId: string, variant: keyof typeof VARIANTS) => `derived/${variant}/${imageId}.webp`;
+export const derivative = (imageId: string, masterKey: string, variant: keyof typeof VARIANTS) =>
+  cachedWebp(derivativeKey(imageId, variant), masterKey, { width: VARIANTS[variant], withoutEnlargement: true }, 82);

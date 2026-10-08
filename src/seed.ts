@@ -1,11 +1,11 @@
 // Demo data until the admin panel / photo ingestion exist: a school, a shoot, two siblings with photos,
 // and one single-use code each. Run: npm run seed:demo  (prints the codes once — only hashes are stored)
 import 'dotenv/config';
-import { copyFile, mkdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import sharp from 'sharp';
 import { generateChildCode, hashChildCode } from './children/linking.js';
-import { masterPath } from './gallery/media.js';
+import { putMaster } from './gallery/media.js';
 import { PrismaService } from './prisma.service.js';
 
 // Sample photos from the Figma export stand in for real shoot images.
@@ -30,9 +30,9 @@ for (const [firstName, className] of [['Emma', 'Year 2 Oak'], ['Leo', 'Reception
   // First shot of each child is the anchor (holding their code card) — stored, but never shown to parents.
   for (const [i, file] of [photos[firstName][0], ...photos[firstName]].entries()) {
     const key = `${shoot.id}/${child.id}/${i}${path.extname(file)}`;
-    await mkdir(path.dirname(masterPath(key)), { recursive: true });
-    await copyFile(path.join(samples, file), masterPath(key));
-    const { width = 0, height = 0 } = await sharp(masterPath(key)).metadata();
+    const buf = await readFile(path.join(samples, file));
+    await putMaster(key, buf);
+    const { width = 0, height = 0 } = await sharp(buf).metadata();
     await db.imageAsset.create({
       data: {
         childId: child.id,

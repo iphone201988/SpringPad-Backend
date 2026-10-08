@@ -22,11 +22,9 @@ import { IsBoolean, IsDateString, IsNotEmpty, IsOptional, IsString, IsUUID, Matc
 import exifReader from 'exif-reader';
 import type { Response } from 'express';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
-import path from 'node:path';
 import sharp from 'sharp';
 import { hashChildCode, normalizeChildCode } from '../../children/linking.js';
-import { masterPath } from '../../gallery/media.js';
+import { cachedWebp, putMaster } from '../../gallery/media.js';
 import { PrismaService } from '../../prisma.service.js';
 import { CurrentStaff, StaffGuard, type Staff } from '../staff-auth.js';
 import { decodeCard, lookalikeVariants } from './decode.js';
@@ -51,8 +49,6 @@ class PhotoPatchDto {
   @IsOptional() @IsBoolean() excluded?: boolean;
   @IsOptional() @IsBoolean() runApproved?: boolean;
 }
-
-const mediaRoot = () => path.resolve(process.env.MEDIA_DIR ?? 'storage');
 
 @Controller('admin')
 @UseGuards(StaffGuard)
@@ -122,8 +118,7 @@ export class ShootsController {
 
     const id = randomUUID();
     const masterKey = `shoots/${shootId}/${id}.${info.format === 'jpeg' ? 'jpg' : info.format}`;
-    await mkdir(path.dirname(masterPath(masterKey)), { recursive: true });
-    await writeFile(masterPath(masterKey), file.buffer);
+    await putMaster(masterKey, file.buffer);
 
     const decoded = await decodeCard(file.buffer);
     // Strict, as the brief asks: only codes issued for this shoot count; a card from another photo day is "unknown".
@@ -247,14 +242,8 @@ export class ShootsController {
   async thumb(@Param('id', ParseUUIDPipe) id: string, @Res() res: Response) {
     const p = await this.db.shootPhoto.findUnique({ where: { id }, select: { masterKey: true } });
     if (!p) throw new NotFoundException();
-    const out = path.join(mediaRoot(), 'derived', 'admin', `${id}.webp`);
-    try {
-      await stat(out);
-    } catch {
-      await mkdir(path.dirname(out), { recursive: true });
-      await sharp(masterPath(p.masterKey)).rotate().resize({ width: 360, height: 360, fit: 'inside' }).webp({ quality: 70 }).toFile(out);
-    }
-    res.set({ 'content-type': 'image/webp', 'cache-control': 'private, max-age=3600' }).send(await readFile(out));
+    const out = await cachedWebp(`derived/admin/${id}.webp`, p.masterKey, { width: 360, height: 360, fit: 'inside' }, 70);
+    res.set({ 'content-type': 'image/webp', 'cache-control': 'private, max-age=3600' }).send(out);
   }
 }
 
